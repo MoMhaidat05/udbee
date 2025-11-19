@@ -341,6 +341,24 @@ def main_test_harness():
         writer = csv.writer(f)
         writer.writerow(["TestName", "Iteration", "Duration_ms", "Status"])
         run_test(
+            command_name="Light (whoami)",
+            command_str="whoami",
+            iterations=500,
+            csv_writer=writer
+        )
+        run_test(
+            command_name="Medium (netstat -antup)",
+            command_str="netstat -antup",
+            iterations=500,
+            csv_writer=writer
+        )
+        run_test(
+            command_name="Heavy (netstat -ano)",
+            command_str="netstat -ano",
+            iterations=500,
+            csv_writer=writer
+        )
+        run_test(
             command_name="Very Heavy (ls -lR /usr/bin 2>/dev/null | head -n 1000)",
             command_str="ls -lR /usr/bin 2>/dev/null | head -n 1000",
             iterations=500,
@@ -350,6 +368,7 @@ def main_test_harness():
     log_success("--- [!!] ALL PERFORMANCE TESTS COMPLETE [!!] ---")
     log_info(f"Results saved to {csv_filename}")
     log_info("Test harness finished. Returning to interactive shell.")
+
 
 
 
@@ -447,4 +466,5 @@ try:
     main()
 except KeyboardInterrupt:
     log_info("<ansiyellow>Exiting on user interrupt (Ctrl+C)</ansiyellow>")
+
     exit()
