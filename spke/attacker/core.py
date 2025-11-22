@@ -20,7 +20,7 @@ current_missing_packets = 0
 # -----------------------------------
 
 parser = argparse.ArgumentParser(description="UDBee - UDP Covert Channel Tool")
-parser.add_argument("-ip", required=True, type=str, help="Target IP address, IPv4 only")
+# parser.add_argument("-ip", required=True, type=str, help="Target IP address, IPv4 only")
 parser.add_argument("--received-chunks", type=int, default=10, help="Received chunks size in KB unit, default is 10KB byte (make it low to avoid memory overflow)")
 parser.add_argument("-delay", type=float, default=0, help="Delay between fragments, default is a float number between 0 and 3")
 parser.add_argument("-buffer", type=float, default=10000, help="Fragments buffer, default is 10000 (to prevent memory overflow)")
@@ -35,7 +35,7 @@ SERVER = (my_ip, my_port)
 target_ip = args.ip
 target_port = None 
 
-chunk_size = 70
+chunk_size = 120
 delay = args.delay 
 received_chunk_size = args.received_chunks * 1024
 buffer_size = args.buffer
@@ -151,7 +151,7 @@ def timeout_checker():
         time.sleep(0.5)
 
 def listener():
-    global transmitted_messages, target_port, sent_chunks, received_chunks, expected_chunks, total_data_received, last_received_time, resends_requests, CURRENT_SESSION_KEY, my_priv_key
+    global transmitted_messages, target_ip, target_port, sent_chunks, received_chunks, expected_chunks, total_data_received, last_received_time, resends_requests, CURRENT_SESSION_KEY, my_priv_key
     
     while True:
         try:
@@ -195,6 +195,7 @@ def listener():
                 
                 ip, port = addr
                 target_port = int(port)
+                target_ip = ip
                 last_received_time = time.time()
                 
                 if session_id not in received_chunks:
