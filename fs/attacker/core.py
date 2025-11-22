@@ -120,7 +120,7 @@ def timeout_checker():
     while True:
         try:
             if last_received_time is not None:
-                if resends_requests < 3:  # Only retry 3 times
+                if resends_requests < 6:  # Only retry 6 times
                     try:
                         current_session_id = None
                         current_buffer = None
@@ -129,7 +129,7 @@ def timeout_checker():
                             current_buffer = received_chunks[current_session_id]["chunks"]
                             expected_chunks = received_chunks[current_session_id]["total"]
                         # If 3+ seconds passed and we're still missing chunks, request resend
-                        if expected_chunks and current_buffer and (len(current_buffer) > 0) and ((time.time() - last_received_time) > 3):
+                        if expected_chunks and current_buffer and (len(current_buffer) > 0) and ((time.time() - last_received_time) > 1.5):
                             missing_packets = check_missing_packets(current_buffer, expected_chunks)
                             if missing_packets:
                                 log_info(f"<ansiyellow>Received an incomplete response from the vicim, asking victim for {len(missing_packets)} missing packets</ansiyellow>")
@@ -137,12 +137,12 @@ def timeout_checker():
                                 msg = f"RESEND:{indices_str}"
                                 send_msg(msg, False)
                                 resends_requests += 1
-                                time.sleep(5)
+                                time.sleep(1)
                                 continue
                     except Exception as e:
                         log_error(f"Timeout checker error: {str(e)}")
                 else:
-                    # Give up after 3 retries
+                    # Give up after 6 retries
                     log_error("<ansired>Received an incomplete response from the vicim, tried 3 times to request the missing packets but didn't receive them, IGNORING THE RESPONSE!</ansired>")
                     resends_requests = 0
                     last_received_time = None
@@ -450,4 +450,5 @@ try:
 except KeyboardInterrupt:
     log_info("<ansiyellow>Exiting on user interrupt (Ctrl+C)</ansiyellow>")
     exit()
+
 
