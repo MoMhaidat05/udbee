@@ -32,7 +32,7 @@ my_ip = "0.0.0.0"
 my_port = 27381
 SERVER = (my_ip, my_port)
 
-target_ip = args.ip
+target_ip = None # args.ip
 target_port = None 
 
 chunk_size = 120
