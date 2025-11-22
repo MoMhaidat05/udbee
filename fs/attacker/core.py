@@ -277,7 +277,8 @@ def listener():
                     elif full_msg == "heartbeat":
                         pass
                     else:
-                        print_formatted_text(HTML(f"<ansigreen>{html.escape(full_msg)}</ansigreen>"))
+                        pass
+                        # print_formatted_text(HTML(f"<ansigreen>{html.escape(full_msg)}</ansigreen>"))
                     
                     COMMAND_READY.set()
                     
@@ -290,6 +291,7 @@ def listener():
             pass
 
 def run_test(command_name, command_str, iterations, csv_writer):
+    global retransmission_count, total_missing_packets
     log_info(f"\n--- Starting Performance Test: '{command_name}' ({iterations} iterations) ---")
     timings_ms = []
     failures = 0
@@ -308,7 +310,7 @@ def run_test(command_name, command_str, iterations, csv_writer):
         
         if not success:
             log_error(f"Iteration {i+1} FAILED (Timeout after 120s)")
-            csv_writer.writerow([command_name, i+1, "N/A", "TIMEOUT"])
+            csv_writer.writerow([command_name, i+1, "N/A", "TIMEOUT", retransmission_count, total_missing_packets])
             failures += 1
         else:
             duration_ms = (end_time - start_time) * 1000
