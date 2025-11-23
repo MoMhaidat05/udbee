@@ -19,7 +19,7 @@ retransmission_count = 0
 total_missing_packets = 0
 parser = argparse.ArgumentParser(description="UDBee - UDP Covert Channel Tool")
 #parser.add_argument("-ip", required=True, type=str, help="Target IP address, IPv4 only")
-parser.add_argument("--received-chunks", type=int, default=255, help="Received chunks size in KB unit, default is 255 bytes byte")
+parser.add_argument("--received-chunks", type=int, default=255000, help="Received chunks size in KB unit, default is 255 bytes byte")
 parser.add_argument("-delay", type=float, default=0, help="Delay between fragments, default is a float number between 0 and 3")
 parser.add_argument("-buffer", type=float, default=10000, help="Fragments buffer, default is 10000 (to prevent memory overflow)")
 parser.add_argument("-jitter", type=float, default=0, help="Random +/- jitter to apply on each fragment delay")
